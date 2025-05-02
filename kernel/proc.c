@@ -325,6 +325,153 @@ fork(void)
   return pid;
 }
 
+
+
+int
+forkn(int n, uint64 pids)
+{
+  if (n < 1 || n > 16)
+    return -1;
+
+  struct proc *p = myproc();
+  int created = 0;
+  int child_pids[16];
+  struct proc *children[16]; // array to store the children processes
+  
+
+  for (int i = 0; i < n; i++) {
+    struct proc *np = allocproc(); //acuire(&np->lock) : acquire lock for the new process
+    if (np == 0) { // didnt successfully allocate a new process
+      for (int j = 0; j < created; j++) {
+        kill(child_pids[j]); // kill all the children that were created
+      }
+      return -1;
+    }
+    
+    if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) { // copy user memory from parent to child. if not succeded
+      freeproc(np);
+      release(&np->lock);
+      for (int j = 0; j < created; j++) {
+        kill(child_pids[j]);
+      }
+      return -1;
+    }
+    np->sz = p->sz; // update the size of the child process
+
+
+    *(np->trapframe) = *(p->trapframe); // copy the trapframe from parent to child
+
+    
+    np->trapframe->a0 = i + 1; // set the return value of the child process. cause forkn to return i+1 in the child
+
+    for (int fd = 0; fd < NOFILE; fd++) {
+      if (p->ofile[fd])
+        np->ofile[fd] = filedup(p->ofile[fd]);
+    }
+    np->cwd = idup(p->cwd);
+    safestrcpy(np->name, p->name, sizeof(p->name));
+
+
+    release(&np->lock);
+
+    acquire(&wait_lock);
+    np->parent = p;
+    release(&wait_lock);
+
+    acquire(&np->lock); //acquire lock for the new process
+    int pid = np->pid;
+    children[created] = np; // store the child process in the array
+    child_pids[created++] = pid;
+    release(&np->lock);
+
+    printf("Created child %d with pid %d\n", i + 1,np->pid);
+  }
+
+  for (int i = 0; i < created; i++) {
+    acquire(&children[i]->lock);
+    children[i]->state = RUNNABLE;
+    release(&children[i]->lock);
+  }
+
+  if (copyout(p->pagetable, pids, (char *)child_pids, n * sizeof(int)) < 0) {
+    return -1;
+  }
+ return 0;
+}
+
+
+int waitall(int* n, int* statuses) {
+  struct proc *p = myproc();
+  struct proc *pp;
+  int local_statuses[NPROC]; // array to store the exit statuses of the children
+  
+  acquire(&wait_lock);
+
+  int place = 0;
+  for(;;){
+    int havekids = 0;
+    int count_zombies = 0;
+  for (pp = proc; pp < &proc[NPROC]; pp++) { //
+    if (pp->parent == p) { 
+      havekids++;       // increment the number of children
+      acquire(&pp->lock);
+      if (pp->state == ZOMBIE) {  // check if the child is a zombie 
+        count_zombies++;  
+        if (place < 16){ // check if the array is not full
+          local_statuses[place++] = pp->xstate;
+        }
+          freeproc(pp);
+      }
+      release(&pp->lock);
+    }
+  }
+
+  if (havekids == 0) { // if the process has no children, return -1
+    release(&wait_lock);
+    int zero = 0;
+    if (copyout(p->pagetable, (uint64) n, (char*)&zero, sizeof(int)) < 0)
+      return -1;
+    return 0;
+  }
+
+  if (count_zombies == havekids) { // if all the children are zombies (almost succes)
+    if (copyout(p->pagetable, (uint64)statuses, (char*)local_statuses, place * sizeof(int)) < 0) {
+      release(&wait_lock);
+      return -1;
+    }
+
+    if (copyout(p->pagetable, (uint64)n, (char*)&place, sizeof(int)) < 0) {
+      release(&wait_lock);
+      return -1;
+    }
+    release(&wait_lock);
+    return 0;
+  }
+  else{
+  
+    sleep(p, &wait_lock); // Sleep until a child process exits.
+  }
+
+} 
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // Pass p's abandoned children to init.
 // Caller must hold wait_lock.
 void
@@ -344,7 +491,7 @@ reparent(struct proc *p)
 // An exited process remains in the zombie state
 // until its parent calls wait().
 void
-exit(int status)
+exit(int status, char *msg)
 {
   struct proc *p = myproc();
 
@@ -376,6 +523,9 @@ exit(int status)
   acquire(&p->lock);
 
   p->xstate = status;
+
+  safestrcpy(p->exit_msg, msg, sizeof(p->exit_msg));
+
   p->state = ZOMBIE;
 
   release(&wait_lock);
@@ -388,7 +538,7 @@ exit(int status)
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int
-wait(uint64 addr)
+wait(uint64 addr , uint64 msgaddr)
 {
   struct proc *pp;
   int havekids, pid;
@@ -414,6 +564,13 @@ wait(uint64 addr)
             release(&wait_lock);
             return -1;
           }
+          if (msgaddr != 0 && copyout(p->pagetable, msgaddr, pp->exit_msg, sizeof(pp->exit_msg)) < 0) {
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
+         }
+
+
           freeproc(pp);
           release(&pp->lock);
           release(&wait_lock);
