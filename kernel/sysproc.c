@@ -95,3 +95,64 @@ sys_memsize(void){
   struct proc *p = myproc();
   return p->sz;
 }
+
+uint64 sys_co_yield(void)
+{
+  int pid, value;
+  argint(0, &pid);
+  argint(1, &value);
+
+  struct proc *p = myproc();
+
+  // Reject invalid PID or self-yield
+  if(pid <= 0 || p->pid == pid){
+    return -1;
+  }
+
+  // Find target process by PID
+  struct proc *target = find_proc_by_pid(pid);
+  if(target == 0){
+    return -1;
+  }
+
+  // Maybe dead lock condition TODO!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
+  // Acquire locks to safely access process state
+  acquire(&p->lock);
+  acquire(&target->lock);
+
+  // Validate target process state
+  if(target->state == UNUSED || target->state == USED || target->state == ZOMBIE || target->killed){
+    release(&target->lock);
+    release(&p->lock);
+    return -1;
+  }
+
+  // =========================
+  // CASE 1: Target is already waiting for us
+  // =========================
+  if(target->state == SLEEPING && target->chan == p){
+    uint64 other_val = target->trapframe->a0;
+
+    target->trapframe->a0 = value;
+    p->trapframe->a0 = other_val;
+
+    release(&target->lock);
+    wakeup(p);
+
+    release(&p->lock);
+    return p->trapframe->a0;
+  }
+
+  // =========================
+  // CASE 2: Target is not waiting (we are first)
+  // =========================
+
+  p->trapframe->a0 = value;
+
+  release(&target->lock);
+
+  sleep(target, &p->lock);
+
+  release(&p->lock);
+  return p->trapframe->a0;
+}

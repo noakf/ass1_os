@@ -551,7 +551,7 @@ sleep(void *chan, struct spinlock *lk)
   p->chan = chan;
   p->state = SLEEPING;
 
-  sched();
+  sched(); 
 
   // Tidy up.
   p->chan = 0;
@@ -680,4 +680,24 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// Search the process table for a process with the given pid.
+// Returns a pointer to the process if found and not
+// in UNUSED state, with the lock already released. 
+struct proc*
+find_proc(int pid)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->pid == pid && p->state != UNUSED){
+      release(&p->lock);
+      return p;
+    }
+    release(&p->lock);
+  }
+
+  return 0;
 }
