@@ -110,15 +110,20 @@ uint64 sys_co_yield(void)
   }
 
   // Find target process by PID
-  struct proc *target = find_proc_by_pid(pid);
+  struct proc *target = find_proc(pid);
   if(target == 0){
     return -1;
   }
 
   // Maybe dead lock condition TODO!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
   // Acquire locks to safely access process state
-  acquire(&p->lock);
-  acquire(&target->lock);
+  if(p < target){
+    acquire(&p->lock);
+    acquire(&target->lock);
+  } else {
+    acquire(&target->lock);
+    acquire(&p->lock);
+  }
 
   // Validate target process state
   if(target->state == UNUSED || target->state == USED || target->state == ZOMBIE || target->killed){
