@@ -445,27 +445,39 @@ void
 scheduler(void)
 {
   struct proc *p;
+  struct proc *retp;
   struct cpu *c = mycpu();
-  
+
   c->proc = 0;
+
   for(;;){
-    // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
 
-    for(p = proc; p < &proc[NPROC]; p++) {
+    for(p = proc; p < &proc[NPROC]; p++){
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
+
+      if(p->state == RUNNABLE){
         p->state = RUNNING;
         c->proc = p;
+
         swtch(&c->context, &p->context);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
+        /*
+         * Normally retp == p.
+         * But after direct co_yield handoff,
+         * the process that returns to the scheduler
+         * may be different from the one we switched to.
+         */
+        retp = c->proc;
         c->proc = 0;
+
+        if(retp == 0)
+          panic("scheduler: null return proc");
+
+        release(&retp->lock);
+        continue;
       }
+
       release(&p->lock);
     }
   }
@@ -682,22 +694,138 @@ procdump(void)
   }
 }
 
-// Search the process table for a process with the given pid.
-// Returns a pointer to the process if found and not
-// in UNUSED state, with the lock already released. 
 struct proc*
-find_proc(int pid)
+find_proc_locked(int pid, struct proc *skip)
 {
   struct proc *p;
 
   for(p = proc; p < &proc[NPROC]; p++){
+    if(p == skip){
+      continue;
+    }
+     
     acquire(&p->lock);
     if(p->pid == pid && p->state != UNUSED){
-      release(&p->lock);
-      return p;
+      return p; // returned locked
     }
     release(&p->lock);
   }
 
   return 0;
+}
+
+static void
+co_switch(struct proc *self, struct proc *target)
+{
+  struct cpu *c;
+
+  release(&self->lock);
+
+  c = mycpu();
+  c->proc = target;
+
+  swtch(&self->context, &target->context);
+
+  c->proc = self;
+}
+
+int
+co_yield(int pid, int value)
+{
+  struct proc *self, *target;
+
+  if(pid <= 0 || value <= 0)
+    return -1;
+
+  self = myproc();
+
+  if(pid == self->pid)
+    return -1;
+
+  acquire(&self->lock);
+
+  // Returns target with target->lock held.
+  // We pass self so the search will not try to lock self again.
+  target = find_proc_locked(pid, self);
+
+  if(target == 0){
+    release(&self->lock);
+    return -1;
+  }
+
+  if(target->killed ||
+     target->state == UNUSED ||
+     target->state == USED ||
+     target->state == ZOMBIE){
+    release(&target->lock);
+    release(&self->lock);
+    return -1;
+  }
+
+  /*
+   * Case 1:
+   * target is sleeping while waiting specifically for self.
+   */
+  if(target->state == SLEEPING && target->chan == self){
+    // Make our value become target's syscall return value.
+    target->trapframe->a0 = value;
+    target->chan = 0;
+    target->state = RUNNING;
+
+    // self now waits for target to yield back.
+    self->chan = target;
+    self->state = SLEEPING;
+
+    co_switch(self, target);
+
+    /*
+     * After a valid switch back, self->lock must be held.
+     * The process that yielded back to us acquired this lock before swtch.
+     */
+    if(!holding(&self->lock))
+      panic("co_yield: self lock not held");
+
+    //If chan is non-zero, self was not resumed by a valid co_yield handshake.
+    if(self->chan != 0){
+      self->chan = 0;
+      release(&self->lock);
+      return -1;
+    }
+
+    release(&self->lock);
+    return self->trapframe->a0;
+  }
+
+  /*
+  * Case 2:
+  * target hasn't called co_yield yet.
+  * If it can run, give it the CPU so it can call its co_yield.
+  */
+  if(target->state == RUNNABLE){
+    self->chan = target;
+    self->state = SLEEPING;
+
+    // Run target immediately, bypassing the scheduler.
+    target->state = RUNNING;
+
+    co_switch(self, target);
+
+    // We return here only when target resumes us.
+    if(!holding(&self->lock))
+      panic("co_yield: self lock not held");
+
+    if(self->chan != 0){
+      self->chan = 0;
+      release(&self->lock);
+      return -1;
+    }
+
+    release(&self->lock);
+    return self->trapframe->a0;
+  }
+
+  // target exists, but is not in a state that supports handoff.
+  release(&target->lock);
+  release(&self->lock);
+  return -1;
 }

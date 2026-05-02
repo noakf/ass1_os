@@ -46,9 +46,11 @@ acquire(struct spinlock *lk)
 void
 release(struct spinlock *lk)
 {
-  if(!holding(lk))
+  if(!holding(lk)){
+    printf("panic release debug: lock=%s lk->cpu=%p mycpu=%p\n",
+           lk->name, lk->cpu, mycpu());
     panic("release");
-
+  }
   lk->cpu = 0;
 
   // Tell the C compiler and the CPU to not move loads or stores
